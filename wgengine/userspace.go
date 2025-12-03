@@ -111,6 +111,7 @@ type userspaceEngine struct {
 	router         router.Router
 	dialer         *tsdial.Dialer
 	confListenPort uint16 // original conf.ListenPort
+	confListenAddr netip.Addr
 	dns            *dns.Manager
 	magicConn      *magicsock.Conn
 	netMon         *netmon.Monitor
@@ -224,6 +225,11 @@ type Config struct {
 	// If zero, a port is automatically selected.
 	ListenPort uint16
 
+	// ListenAddr is the IP address on which the engine will listen for
+	// WireGuard and peer-to-peer traffic. If invalid, the platform default
+	// (all interfaces) is used.
+	ListenAddr netip.Addr
+
 	// RespondToPing determines whether this engine should internally
 	// reply to ICMP pings, without involving the OS.
 	// Used in "fake" mode for development.
@@ -266,6 +272,8 @@ func NewFakeUserspaceEngine(logf logger.Logf, opts ...any) (Engine, error) {
 				return nil, fmt.Errorf("invalid ListenPort: %d", v)
 			}
 			conf.ListenPort = uint16(v)
+		case netip.Addr:
+			conf.ListenAddr = v
 		case func(any):
 			conf.SetSubsystem = v
 		case *controlknobs.Knobs:
@@ -356,6 +364,7 @@ func NewUserspaceEngine(logf logger.Logf, conf Config) (_ Engine, reterr error) 
 		router:         rtr,
 		dialer:         conf.Dialer,
 		confListenPort: conf.ListenPort,
+		confListenAddr: conf.ListenAddr,
 		birdClient:     conf.BIRDClient,
 		controlKnobs:   conf.ControlKnobs,
 		reconfigureVPN: conf.ReconfigureVPN,
@@ -405,6 +414,7 @@ func NewUserspaceEngine(logf logger.Logf, conf Config) (_ Engine, reterr error) 
 		EventBus:       e.eventBus,
 		Logf:           logf,
 		Port:           conf.ListenPort,
+		ListenAddr:     conf.ListenAddr,
 		EndpointsFunc:  endpointsFn,
 		DERPActiveFunc: e.RequestStatus,
 		IdleFunc:       e.tundev.IdleDuration,
@@ -984,6 +994,7 @@ func (e *userspaceEngine) Reconfig(cfg *wgcfg.Config, routerCfg *router.Config, 
 	e.mu.Unlock()
 
 	listenPort := e.confListenPort
+	listenAddr := e.confListenAddr
 	if e.controlKnobs != nil && e.controlKnobs.RandomizeClientPort.Load() {
 		listenPort = 0
 	}
@@ -1007,8 +1018,9 @@ func (e *userspaceEngine) Reconfig(cfg *wgcfg.Config, routerCfg *router.Config, 
 	}
 
 	listenPortChanged := listenPort != e.magicConn.LocalPort()
+	listenAddrChanged := listenAddr != e.magicConn.ListenAddr()
 	peerMTUChanged := peerMTUEnable != e.magicConn.PeerMTUEnabled()
-	if !engineChanged && !routerChanged && !dnsChanged && !listenPortChanged && !isSubnetRouterChanged && !peerMTUChanged {
+	if !engineChanged && !routerChanged && !dnsChanged && !listenPortChanged && !listenAddrChanged && !isSubnetRouterChanged && !peerMTUChanged {
 		return ErrNoChanges
 	}
 	newLogIDs := cfg.NetworkLogging
@@ -1065,7 +1077,7 @@ func (e *userspaceEngine) Reconfig(cfg *wgcfg.Config, routerCfg *router.Config, 
 		e.logf("wgengine: Reconfig: SetPrivateKey: %v", err)
 	}
 	e.magicConn.UpdatePeers(peerSet)
-	e.magicConn.SetPreferredPort(listenPort)
+	e.magicConn.SetPreferredPortAndAddr(listenPort, listenAddr)
 	e.magicConn.UpdatePMTUD()
 
 	if err := e.maybeReconfigWireguardLocked(discoChanged); err != nil {
