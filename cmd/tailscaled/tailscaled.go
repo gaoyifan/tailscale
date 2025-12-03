@@ -18,6 +18,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -118,6 +119,10 @@ var args struct {
 	confFile            string // empty, file path, or "vm:user-data"
 	debug               string
 	port                uint16
+	listenAddr          string
+	listenIP            netip.Addr
+	listenAddr6         string
+	listenIP6           netip.Addr
 	statepath           string
 	encryptState        boolFlag
 	statedir            string
@@ -196,6 +201,8 @@ func main() {
 	}
 	flag.StringVar(&args.tunname, "tun", defaultTunName(), `tunnel interface name; use "userspace-networking" (beta) to not use TUN`)
 	flag.Var(flagtype.PortValue(&args.port, defaultPort()), "port", "UDP port to listen on for WireGuard and peer-to-peer traffic; 0 means automatically select")
+	flag.StringVar(&args.listenAddr, "listen-addr", "", "UDP IPv4 address to listen on for WireGuard and peer-to-peer traffic; empty means all interfaces")
+	flag.StringVar(&args.listenAddr6, "listen-addr6", "", "UDP IPv6 address to listen on for WireGuard and peer-to-peer traffic; empty means all interfaces")
 	flag.StringVar(&args.statepath, "state", "", "absolute path of state file; use 'kube:<secret-name>' to use Kubernetes secrets or 'arn:aws:ssm:...' to store in AWS SSM; use 'mem:' to not store state and register as an ephemeral node. If empty and --statedir is provided, the default is <statedir>/tailscaled.state. Default: "+paths.DefaultTailscaledStateFile())
 	if buildfeatures.HasTPM {
 		flag.Var(&args.encryptState, "encrypt-state", `encrypt the state file on disk; when not set encryption will be enabled if supported on this platform; uses TPM on Linux and Windows, on all other platforms this flag is not supported`)
@@ -240,6 +247,31 @@ func main() {
 		if runtime.GOOS != "windows" || (flag.Arg(0) != "/subproc" && flag.Arg(0) != "/firewall") {
 			log.Fatalf("tailscaled does not take non-flag arguments: %q", flag.Args())
 		}
+	}
+
+	if args.listenAddr != "" {
+		ip, err := netip.ParseAddr(args.listenAddr)
+		if err != nil {
+			log.Fatalf("invalid --listen-addr %q: %v", args.listenAddr, err)
+		}
+		ip = ip.Unmap()
+		if ip.Is6() && !ip.Is4In6() {
+			// Allow using --listen-addr for IPv6 for compatibility with older configs.
+			args.listenIP6 = ip
+		} else {
+			args.listenIP = ip
+		}
+	}
+	if args.listenAddr6 != "" {
+		ip, err := netip.ParseAddr(args.listenAddr6)
+		if err != nil {
+			log.Fatalf("invalid --listen-addr6 %q: %v", args.listenAddr6, err)
+		}
+		ip = ip.Unmap()
+		if !ip.Is6() || ip.Is4In6() {
+			log.Fatalf("--listen-addr6 must be an IPv6 address: %q", args.listenAddr6)
+		}
+		args.listenIP6 = ip
 	}
 
 	if fd, ok := envknob.LookupInt("TS_PARENT_DEATH_FD"); ok && fd > 2 {
@@ -738,6 +770,8 @@ var tstunNew = tstun.New
 func tryEngine(logf logger.Logf, sys *tsd.System, name string) (onlyNetstack bool, err error) {
 	conf := wgengine.Config{
 		ListenPort:    args.port,
+		ListenAddr:    args.listenIP,
+		ListenAddr6:   args.listenIP6,
 		NetMon:        sys.NetMon.Get(),
 		HealthTracker: sys.HealthTracker.Get(),
 		Metrics:       sys.UserMetricsRegistry(),

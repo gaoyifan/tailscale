@@ -152,6 +152,14 @@ type Server struct {
 	// field at zero unless you know what you are doing.
 	Port uint16
 
+	// ListenAddr is the IP address to bind the WireGuard socket to. If invalid,
+	// all interfaces are used.
+	ListenAddr netip.Addr
+
+	// ListenAddr6 is the IPv6 address to bind the WireGuard socket to. If
+	// invalid, all interfaces are used.
+	ListenAddr6 netip.Addr
+
 	// AdvertiseTags specifies tags that should be applied to this node, for
 	// purposes of ACL enforcement. These can be referenced from the ACL policy
 	// document. Note that advertising a tag on the client doesn't guarantee
@@ -642,6 +650,8 @@ func (s *Server) start() (reterr error) {
 	eng, err := wgengine.NewUserspaceEngine(tsLogf, wgengine.Config{
 		EventBus:      sys.Bus.Get(),
 		ListenPort:    s.Port,
+		ListenAddr:    s.ListenAddr,
+		ListenAddr6:   s.ListenAddr6,
 		NetMon:        s.netMon,
 		Dialer:        s.dialer,
 		SetSubsystem:  sys.Set,

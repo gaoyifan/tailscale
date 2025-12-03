@@ -256,6 +256,12 @@ type Conn struct {
 	// port is the preferred port from opts.Port; 0 means auto.
 	port atomic.Uint32
 
+	// listenAddr is the preferred IP address to bind to, if valid.
+	listenAddr syncs.AtomicValue[netip.Addr]
+
+	// listenAddr6 is the preferred IPv6 address to bind to, if valid.
+	listenAddr6 syncs.AtomicValue[netip.Addr]
+
 	// peerMTUEnabled is whether path MTU discovery to peers is enabled.
 	//
 	//lint:ignore U1000 used on Linux/Darwin only
@@ -439,6 +445,15 @@ type Options struct {
 	// Port is the port to listen on.
 	// Zero means to pick one automatically.
 	Port uint16
+
+	// ListenAddr is the IP address to listen on. If invalid, the default
+	// (all interfaces) is used.
+	ListenAddr netip.Addr
+
+	// ListenAddr6 is the IPv6 address to listen on. If invalid, the default
+	// (all interfaces) is used. If not set, ListenAddr is used when it is
+	// a valid IPv6 address.
+	ListenAddr6 netip.Addr
 
 	// EndpointsFunc optionally provides a func to be called when
 	// endpoints change. The called func does not own the slice.
@@ -677,6 +692,8 @@ func NewConn(opts Options) (*Conn, error) {
 	c := newConn(opts.logf())
 	c.eventBus = opts.EventBus
 	c.port.Store(uint32(opts.Port))
+	c.listenAddr.Store(opts.ListenAddr)
+	c.listenAddr6.Store(opts.ListenAddr6)
 	c.controlKnobs = opts.ControlKnobs
 	c.epFunc = opts.endpointsFunc()
 	c.derpActiveFunc = opts.derpActiveFunc()
@@ -1466,6 +1483,43 @@ func (c *Conn) LocalPort() uint16 {
 	}
 	laddr := c.pconn4.LocalAddr()
 	return uint16(laddr.Port)
+}
+
+// ListenAddr returns the configured listen address, if any.
+func (c *Conn) ListenAddr() netip.Addr {
+	return c.listenAddr.Load()
+}
+
+// ListenAddr6 returns the configured IPv6 listen address, if any.
+func (c *Conn) ListenAddr6() netip.Addr {
+	return c.listenAddr6.Load()
+}
+
+// ListenAddrs returns the configured listen addresses for IPv4 and IPv6.
+func (c *Conn) ListenAddrs() (addr4 netip.Addr, addr6 netip.Addr) {
+	return c.listenAddr.Load(), c.listenAddr6.Load()
+}
+
+// SetPreferredPortAndAddrs sets the preferred port and listen addresses.
+func (c *Conn) SetPreferredPortAndAddrs(port uint16, addr, addr6 netip.Addr) {
+	addr = addr.Unmap()
+	addr6 = addr6.Unmap()
+	if uint16(c.port.Load()) == port {
+		if curAddr, _ := c.listenAddr.LoadOk(); curAddr == addr {
+			if curAddr6, _ := c.listenAddr6.LoadOk(); curAddr6 == addr6 {
+				return
+			}
+		}
+	}
+	c.listenAddr.Store(addr)
+	c.listenAddr6.Store(addr6)
+	c.port.Store(uint32(port))
+
+	if err := c.rebind(dropCurrentPort); err != nil {
+		c.logf("%v", err)
+		return
+	}
+	c.resetEndpointStates()
 }
 
 var errNetworkDown = errors.New("magicsock: network down")
@@ -2702,16 +2756,8 @@ func (c *Conn) SetNetworkUp(up bool) {
 
 // SetPreferredPort sets the connection's preferred local port.
 func (c *Conn) SetPreferredPort(port uint16) {
-	if uint16(c.port.Load()) == port {
-		return
-	}
-	c.port.Store(uint32(port))
-
-	if err := c.rebind(dropCurrentPort); err != nil {
-		c.logf("%v", err)
-		return
-	}
-	c.resetEndpointStates()
+	addr4, addr6 := c.ListenAddrs()
+	c.SetPreferredPortAndAddrs(port, addr4, addr6)
 }
 
 // SetPrivateKey sets the connection's private key.
@@ -3495,7 +3541,7 @@ func (c *Conn) listenPacket(network string, port uint16) (nettype.PacketConn, er
 	} else {
 		ctx = sockstats.WithSockStats(ctx, sockstats.LabelMagicsockConnUDP6, c.logf)
 	}
-	addr := net.JoinHostPort("", fmt.Sprint(port))
+	addr := net.JoinHostPort(c.listenHostForNetwork(network), fmt.Sprint(port))
 	if c.testOnlyPacketListener != nil {
 		return nettype.MakePacketListenerWithNetIP(c.testOnlyPacketListener).ListenPacket(ctx, network, addr)
 	}
@@ -3703,6 +3749,28 @@ func newBlockForeverConn() *blockForeverConn {
 	c := new(blockForeverConn)
 	c.cond = sync.NewCond(&c.mu)
 	return c
+}
+
+func (c *Conn) listenHostForNetwork(network string) string {
+	addr4, _ := c.listenAddr.LoadOk()
+	addr6, _ := c.listenAddr6.LoadOk()
+	addr4 = addr4.Unmap()
+	addr6 = addr6.Unmap()
+
+	switch network {
+	case "udp4":
+		if addr4.IsValid() && addr4.Is4() {
+			return addr4.String()
+		}
+	case "udp6":
+		if addr6.IsValid() && addr6.Is6() {
+			return addr6.String()
+		}
+		if addr4.IsValid() && addr4.Is6() {
+			return addr4.String()
+		}
+	}
+	return ""
 }
 
 // simpleDur rounds d such that it stringifies to something short.

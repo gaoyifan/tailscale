@@ -3162,6 +3162,140 @@ func newTestConnAndRegistry(t *testing.T) (*Conn, *usermetric.Registry, func()) 
 	}
 }
 
+type recordingPacketListener struct {
+	mu    sync.Mutex
+	addrs map[string][]string
+}
+
+func newRecordingPacketListener() *recordingPacketListener {
+	return &recordingPacketListener{addrs: make(map[string][]string)}
+}
+
+func (r *recordingPacketListener) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
+	r.mu.Lock()
+	r.addrs[network] = append(r.addrs[network], address)
+	r.mu.Unlock()
+	return net.ListenPacket(network, address)
+}
+
+func (r *recordingPacketListener) addresses(network string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.addrs[network]...)
+}
+
+func TestListenPacketUsesListenAddr(t *testing.T) {
+	t.Run("IPv4", func(t *testing.T) {
+		rec := newRecordingPacketListener()
+		bus := eventbus.New()
+		netMon := must.Get(netmon.New(bus, t.Logf))
+
+		conn := must.Get(NewConn(Options{
+			DisablePortMapper:      true,
+			Logf:                   t.Logf,
+			NetMon:                 netMon,
+			EventBus:               bus,
+			Metrics:                new(usermetric.Registry),
+			ListenAddr:             netip.MustParseAddr("127.0.0.1"),
+			TestOnlyPacketListener: rec,
+		}))
+
+		t.Cleanup(func() {
+			bus.Close()
+			netMon.Close()
+			conn.Close()
+		})
+
+		addrs := rec.addresses("udp4")
+		if len(addrs) == 0 {
+			t.Fatalf("no udp4 listens recorded: %+v", rec.addrs)
+		}
+		if got, want := addrs[0], "127.0.0.1:0"; got != want {
+			t.Fatalf("udp4 listen address = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("IPv6", func(t *testing.T) {
+		pc, err := net.ListenPacket("udp6", "[::1]:0")
+		if err != nil {
+			t.Skipf("udp6 unsupported on this platform: %v", err)
+		}
+		pc.Close()
+
+		rec := newRecordingPacketListener()
+		bus := eventbus.New()
+		netMon := must.Get(netmon.New(bus, t.Logf))
+
+		conn := must.Get(NewConn(Options{
+			DisablePortMapper:      true,
+			Logf:                   t.Logf,
+			NetMon:                 netMon,
+			EventBus:               bus,
+			Metrics:                new(usermetric.Registry),
+			ListenAddr:             netip.MustParseAddr("::1"),
+			TestOnlyPacketListener: rec,
+		}))
+
+		t.Cleanup(func() {
+			bus.Close()
+			netMon.Close()
+			conn.Close()
+		})
+
+		addrs := rec.addresses("udp6")
+		if len(addrs) == 0 {
+			t.Fatalf("no udp6 listens recorded: %+v", rec.addrs)
+		}
+		if got, want := addrs[0], "[::1]:0"; got != want {
+			t.Fatalf("udp6 listen address = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("DualStackOverride", func(t *testing.T) {
+		pc, err := net.ListenPacket("udp6", "[::1]:0")
+		if err != nil {
+			t.Skipf("udp6 unsupported on this platform: %v", err)
+		}
+		pc.Close()
+
+		rec := newRecordingPacketListener()
+		bus := eventbus.New()
+		netMon := must.Get(netmon.New(bus, t.Logf))
+
+		conn := must.Get(NewConn(Options{
+			DisablePortMapper:      true,
+			Logf:                   t.Logf,
+			NetMon:                 netMon,
+			EventBus:               bus,
+			Metrics:                new(usermetric.Registry),
+			ListenAddr:             netip.MustParseAddr("127.0.0.1"),
+			ListenAddr6:            netip.MustParseAddr("::1"),
+			TestOnlyPacketListener: rec,
+		}))
+
+		t.Cleanup(func() {
+			bus.Close()
+			netMon.Close()
+			conn.Close()
+		})
+
+		if addrs := rec.addresses("udp4"); len(addrs) > 0 {
+			if got, want := addrs[0], "127.0.0.1:0"; got != want {
+				t.Fatalf("udp4 listen address = %q, want %q", got, want)
+			}
+		} else {
+			t.Fatalf("no udp4 listens recorded: %+v", rec.addrs)
+		}
+		if addrs := rec.addresses("udp6"); len(addrs) > 0 {
+			if got, want := addrs[0], "[::1]:0"; got != want {
+				t.Fatalf("udp6 listen address = %q, want %q", got, want)
+			}
+		} else {
+			t.Fatalf("no udp6 listens recorded: %+v", rec.addrs)
+		}
+	})
+}
+
 func TestNetworkSendErrors(t *testing.T) {
 	t.Run("network-down", func(t *testing.T) {
 		// TODO(alexc): This test case fails on Windows because it never
