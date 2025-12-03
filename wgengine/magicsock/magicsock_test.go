@@ -3296,6 +3296,45 @@ func TestListenPacketUsesListenAddr(t *testing.T) {
 	})
 }
 
+func TestDetermineEndpointsIncludesIPv6WhenIPv4Bound(t *testing.T) {
+	pc, err := net.ListenPacket("udp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("udp6 unsupported on this platform: %v", err)
+	}
+	pc.Close()
+
+	bus := eventbus.New()
+	netMon := must.Get(netmon.New(bus, t.Logf))
+
+	conn := must.Get(NewConn(Options{
+		DisablePortMapper:      true,
+		Logf:                   t.Logf,
+		NetMon:                 netMon,
+		EventBus:               bus,
+		Metrics:                new(usermetric.Registry),
+		ListenAddr:             netip.MustParseAddr("127.0.0.1"),
+		TestOnlyPacketListener: localhostListener{},
+	}))
+
+	t.Cleanup(func() {
+		bus.Close()
+		netMon.Close()
+		conn.Close()
+	})
+
+	eps, err := conn.determineEndpoints(context.Background())
+	if err != nil {
+		t.Fatalf("determineEndpoints: %v", err)
+	}
+
+	for _, ep := range eps {
+		if ep.Addr.Addr() == netip.MustParseAddr("::1") {
+			return
+		}
+	}
+	t.Fatalf("expected IPv6 endpoint, got %v", eps)
+}
+
 func TestNetworkSendErrors(t *testing.T) {
 	t.Run("network-down", func(t *testing.T) {
 		// TODO(alexc): This test case fails on Windows because it never

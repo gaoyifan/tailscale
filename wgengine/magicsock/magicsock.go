@@ -1406,8 +1406,15 @@ func (c *Conn) determineEndpoints(ctx context.Context) ([]tailcfg.Endpoint, erro
 		addAddr(ep, tailcfg.EndpointExplicitConf)
 	}
 
-	if localAddr := c.pconn4.LocalAddr(); localAddr.IP.IsUnspecified() {
-		ips, loopback, err := netmon.LocalAddresses()
+	localAddr4 := c.pconn4.LocalAddr()
+	localAddr6 := c.pconn6.LocalAddr()
+	useIfacesFor4 := localAddr4.IP == nil || localAddr4.IP.IsUnspecified()
+	useIfacesFor6 := localAddr6.IP == nil || localAddr6.IP.IsUnspecified()
+	var ips, loopback []netip.Addr
+
+	if useIfacesFor4 || useIfacesFor6 {
+		var err error
+		ips, loopback, err = netmon.LocalAddresses()
 		if err != nil {
 			return nil, err
 		}
@@ -1419,13 +1426,32 @@ func (c *Conn) determineEndpoints(ctx context.Context) ([]tailcfg.Endpoint, erro
 			// offline, for example.
 			ips = loopback
 		}
+	}
+
+	if useIfacesFor4 {
 		for _, ip := range ips {
-			addAddr(netip.AddrPortFrom(ip, uint16(localAddr.Port)), tailcfg.EndpointLocal)
+			if ip.Is4() {
+				addAddr(netip.AddrPortFrom(ip, uint16(localAddr4.Port)), tailcfg.EndpointLocal)
+			}
 		}
 	} else {
 		// Our local endpoint is bound to a particular address.
 		// Do not offer addresses on other local interfaces.
-		addAddr(ipp(localAddr.String()), tailcfg.EndpointLocal)
+		addAddr(ipp(localAddr4.String()), tailcfg.EndpointLocal)
+	}
+
+	if useIfacesFor6 {
+		port := uint16(localAddr6.Port)
+		if port == 0 {
+			port = uint16(localAddr4.Port)
+		}
+		for _, ip := range ips {
+			if ip.Is6() {
+				addAddr(netip.AddrPortFrom(ip, port), tailcfg.EndpointLocal)
+			}
+		}
+	} else if localAddr6.IP != nil {
+		addAddr(ipp(localAddr6.String()), tailcfg.EndpointLocal)
 	}
 
 	// Note: the endpoints are intentionally returned in priority order,
