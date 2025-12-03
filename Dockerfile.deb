@@ -1,0 +1,20 @@
+# Debian build environment for producing tailscale .deb packages.
+#
+# Usage (from repo root):
+#   docker build -f Dockerfile.deb -t tailscale-deb-env .
+#   docker run --rm -v \"$PWD\":/src tailscale-deb-env
+#   # or choose an architecture: docker run --rm -e DEB_ARCH=arm64 -v \"$PWD\":/src tailscale-deb-env
+# Outputs are written to /src/dist inside your working tree.
+
+FROM golang:1.23-bullseye
+
+# Install tools the build scripts expect (curl for tool/node download, git for version info).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl git xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# Default command builds a Debian package using the mounted source tree.
+# Set DEB_ARCH to override the default amd64 architecture (e.g. arm64).
+CMD ["bash", "-lc", "set -euo pipefail; arch=${DEB_ARCH:-amd64}; target=linux/${arch}/deb; TS_DIST_VERSION_SUFFIX=${TS_DIST_VERSION_SUFFIX:--yifan} PATH=/src/tool:$PATH go run ./cmd/dist build \"$target\""]

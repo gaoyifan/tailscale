@@ -4,6 +4,7 @@ SYNO_DSM ?= "7"
 TAGS ?= "latest"
 
 PLATFORM ?= "flyio" ## flyio==linux/amd64. Set to "" to build all platforms.
+DEB_ARCH ?= amd64
 
 vet: ## Run go vet
 	./tool/go vet ./...
@@ -74,6 +75,10 @@ check: staticcheck vet depaware buildwindows build386 buildlinuxarm buildwasm ##
 
 staticcheck: ## Run staticcheck.io checks
 	./tool/go run honnef.co/go/tools/cmd/staticcheck -- $$(./tool/go run ./tool/listpkgs --ignore-3p  ./...)
+
+deb: ## Build Debian package via Dockerfile.deb; optional SUFFIX=-foo, DEB_ARCH=arm64
+	docker build -f Dockerfile.deb -t tailscale-deb-env .
+	docker run --rm -v "$$(pwd)":/src -e TS_DIST_VERSION_SUFFIX="$(SUFFIX)" -e DEB_ARCH="$(DEB_ARCH)" tailscale-deb-env
 
 kube-generate-all: kube-generate-deepcopy ## Refresh generated files for Tailscale Kubernetes Operator
 	./tool/go generate ./cmd/k8s-operator

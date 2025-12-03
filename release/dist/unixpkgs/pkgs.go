@@ -185,6 +185,11 @@ func (t *debTarget) Build(b *dist.Build) ([]string, error) {
 		return nil, errors.New("deb only supported on linux")
 	}
 
+	version := b.Version.Short
+	if suffix := os.Getenv("TS_DIST_VERSION_SUFFIX"); suffix != "" {
+		version += suffix
+	}
+
 	if err := b.BuildWebClientAssets(); err != nil {
 		return nil, err
 	}
@@ -236,7 +241,7 @@ func (t *debTarget) Build(b *dist.Build) ([]string, error) {
 		Name:        "tailscale",
 		Arch:        arch,
 		Platform:    "linux",
-		Version:     b.Version.Short,
+		Version:     version,
 		Maintainer:  "Tailscale Inc <info@tailscale.com>",
 		Description: "The easiest, most secure, cross platform way to use WireGuard + oauth2 + 2FA/SSO",
 		Homepage:    "https://www.tailscale.com",
@@ -283,7 +288,7 @@ func (t *debTarget) Build(b *dist.Build) ([]string, error) {
 		return nil, err
 	}
 
-	filename := fmt.Sprintf("tailscale_%s_%s.deb", b.Version.Short, arch)
+	filename := fmt.Sprintf("tailscale_%s_%s.deb", version, arch)
 	log.Printf("Building %s", filename)
 	f, err := os.Create(filepath.Join(b.Out, filename))
 	if err != nil {
