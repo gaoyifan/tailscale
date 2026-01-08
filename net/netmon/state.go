@@ -155,12 +155,28 @@ type Interface struct {
 	Desc     string     // extra description (used on Windows)
 }
 
-func (i Interface) IsLoopback() bool { return isLoopback(i.Interface) }
-func (i Interface) IsUp() bool       { return isUp(i.Interface) }
+func (i Interface) IsLoopback() bool {
+	if i.Interface == nil {
+		return false
+	}
+	return isLoopback(i.Interface)
+}
+
+func (i Interface) IsUp() bool {
+	if i.Interface == nil {
+		return false
+	}
+	return isUp(i.Interface)
+}
+
 func (i Interface) Addrs() ([]net.Addr, error) {
 	if i.AltAddrs != nil {
 		return i.AltAddrs, nil
 	}
+	if i.Interface == nil {
+		return nil, nil
+	}
+
 	return i.Interface.Addrs()
 }
 
@@ -277,6 +293,9 @@ type State struct {
 
 	// PAC is the URL to the Proxy Autoconfig URL, if applicable.
 	PAC string
+
+	// TailscaleInterfaceIndex is the index of the Tailscale interface
+	TailscaleInterfaceIndex int
 }
 
 func (s *State) String() string {
@@ -491,6 +510,16 @@ func getState(optTSInterfaceName string) (*State, error) {
 		ifUp := ni.IsUp()
 		s.Interface[ni.Name] = ni
 		s.InterfaceIPs[ni.Name] = append(s.InterfaceIPs[ni.Name], pfxs...)
+
+		// Skip uninteresting interfaces.
+		if IsInterestingInterface != nil && !IsInterestingInterface(ni, pfxs) {
+			return
+		}
+
+		if isTailscaleInterface(ni.Name, pfxs) {
+			s.TailscaleInterfaceIndex = ni.Index
+		}
+
 		if !ifUp || isTSInterfaceName || isTailscaleInterface(ni.Name, pfxs) {
 			return
 		}

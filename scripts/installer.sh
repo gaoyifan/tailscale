@@ -246,7 +246,7 @@ main() {
 				VERSION=""
 				PACKAGETYPE="dnf"
 				;;
-			rocky|almalinux|nobara|openmandriva|sangoma|risios|cloudlinux|alinux|fedora-asahi-remix)
+			rocky|almalinux|nobara|openmandriva|sangoma|risios|cloudlinux|alinux|fedora-asahi-remix|ultramarine)
 				OS="fedora"
 				VERSION=""
 				PACKAGETYPE="dnf"
@@ -335,6 +335,11 @@ main() {
 				OS="photon"
 				VERSION="$VERSION_MAJOR"
 				PACKAGETYPE="tdnf"
+				;;
+			steamos)
+				echo "To install Tailscale on SteamOS, please follow the instructions here:"
+				echo "https://github.com/tailscale-dev/deck-tailscale"
+				exit 1
 				;;
 
 			# TODO: wsl?
