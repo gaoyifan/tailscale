@@ -227,6 +227,8 @@ var _TCPPortHandlerCloneNeedsRegeneration = TCPPortHandler(struct {
 	HTTP          bool
 	TCPForward    string
 	TerminateTLS  string
+	CertFile      string
+	KeyFile       string
 	ProxyProtocol int
 }{})
 

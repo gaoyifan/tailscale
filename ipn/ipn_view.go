@@ -840,6 +840,15 @@ func (v TCPPortHandlerView) TCPForward() string { return v.ж.TCPForward }
 // (the HTTPS mode uses ServeConfig.Web)
 func (v TCPPortHandlerView) TerminateTLS() string { return v.ж.TerminateTLS }
 
+// CertFile and KeyFile are absolute paths to a PEM-encoded certificate
+// chain and private key. When set, tailscaled uses this certificate instead
+// of provisioning one for HTTPS or TLS-terminated TCP connections.
+//
+// They must either both be empty or both be set.
+// All manual TLS listeners in a ServeConfig must use the same paths.
+func (v TCPPortHandlerView) CertFile() string { return v.ж.CertFile }
+func (v TCPPortHandlerView) KeyFile() string  { return v.ж.KeyFile }
+
 // ProxyProtocol indicates whether to send a PROXY protocol header
 // before forwarding the connection to TCPForward.
 //
@@ -852,6 +861,8 @@ var _TCPPortHandlerViewNeedsRegeneration = TCPPortHandler(struct {
 	HTTP          bool
 	TCPForward    string
 	TerminateTLS  string
+	CertFile      string
+	KeyFile       string
 	ProxyProtocol int
 }{})
 

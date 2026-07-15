@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
@@ -101,6 +102,55 @@ func TestServeDevConfigMutations(t *testing.T) {
 						}},
 					},
 				},
+			}},
+		},
+		{
+			name: "serve_background_manual_certificate",
+			initialState: fakeLocalServeClient{
+				queryFeatureResponse: &mockQueryFeatureResponse{err: errors.New("automatic HTTPS must not be enabled")},
+			},
+			steps: []step{{
+				command: cmd("serve --bg --cert-file=/cert.pem --key-file=/key.pem localhost:3000"),
+				want: &ipn.ServeConfig{
+					TCP: map[uint16]*ipn.TCPPortHandler{
+						443: {HTTPS: true, CertFile: "/cert.pem", KeyFile: "/key.pem"},
+					},
+					Web: map[ipn.HostPort]*ipn.WebServerConfig{
+						"foo.test.ts.net:443": {Handlers: map[string]*ipn.HTTPHandler{
+							"/": {Proxy: "http://localhost:3000"},
+						}},
+					},
+				},
+			}},
+		},
+		{
+			name: "tls_terminated_tcp_manual_certificate",
+			steps: []step{{
+				command: cmd("serve --bg --tls-terminated-tcp=8443 --cert-file=/cert.pem --key-file=/key.pem tcp://localhost:5432"),
+				want: &ipn.ServeConfig{
+					TCP: map[uint16]*ipn.TCPPortHandler{
+						8443: {
+							TCPForward:   "localhost:5432",
+							TerminateTLS: "foo.test.ts.net",
+							CertFile:     "/cert.pem",
+							KeyFile:      "/key.pem",
+						},
+					},
+				},
+			}},
+		},
+		{
+			name: "manual_certificate_requires_key",
+			steps: []step{{
+				command: cmd("serve --bg --cert-file=/cert.pem localhost:3000"),
+				wantErr: anyErr(),
+			}},
+		},
+		{
+			name: "manual_certificate_rejects_plain_http",
+			steps: []step{{
+				command: cmd("serve --bg --http=80 --cert-file=/cert.pem --key-file=/key.pem localhost:3000"),
+				wantErr: anyErr(),
 			}},
 		},
 		{

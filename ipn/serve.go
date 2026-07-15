@@ -155,11 +155,49 @@ type TCPPortHandler struct {
 	// (the HTTPS mode uses ServeConfig.Web)
 	TerminateTLS string `json:",omitempty"`
 
+	// CertFile and KeyFile are absolute paths to a PEM-encoded certificate
+	// chain and private key. When set, tailscaled uses this certificate instead
+	// of provisioning one for HTTPS or TLS-terminated TCP connections.
+	//
+	// They must either both be empty or both be set.
+	// All manual TLS listeners in a ServeConfig must use the same paths.
+	CertFile string `json:",omitempty"`
+	KeyFile  string `json:",omitempty"`
+
 	// ProxyProtocol indicates whether to send a PROXY protocol header
 	// before forwarding the connection to TCPForward.
 	//
 	// This is only valid if TCPForward is non-empty.
 	ProxyProtocol int `json:",omitzero"`
+}
+
+// HasManualCertificate reports whether sc contains a TCP handler configured
+// with a certificate and private key file.
+func (sc *ServeConfig) HasManualCertificate() bool {
+	if sc == nil {
+		return false
+	}
+	for _, h := range sc.TCP {
+		if h != nil && (h.CertFile != "" || h.KeyFile != "") {
+			return true
+		}
+	}
+	for _, svc := range sc.Services {
+		if svc == nil {
+			continue
+		}
+		for _, h := range svc.TCP {
+			if h != nil && (h.CertFile != "" || h.KeyFile != "") {
+				return true
+			}
+		}
+	}
+	for _, fg := range sc.Foreground {
+		if fg.HasManualCertificate() {
+			return true
+		}
+	}
+	return false
 }
 
 // HTTPHandler is either a path or a proxy to serve.

@@ -169,6 +169,8 @@ type serveEnv struct {
 	http             uint                     // HTTP port
 	tcp              uint                     // TCP port
 	tlsTerminatedTCP uint                     // a TLS terminated TCP port
+	certFile         string                   // manual TLS certificate file
+	keyFile          string                   // manual TLS private key file
 	proxyProtocol    uint                     // PROXY protocol version (1 or 2)
 	subcmd           serveMode                // subcommand
 	yes              bool                     // update without prompt

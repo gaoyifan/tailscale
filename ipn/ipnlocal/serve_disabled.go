@@ -19,6 +19,7 @@ import (
 const serveEnabled = false
 
 type localListener = struct{}
+type manualServeCertificate struct{}
 
 func (b *LocalBackend) DeleteForegroundSession(sessionID string) error {
 	return nil

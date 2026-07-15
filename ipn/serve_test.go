@@ -564,3 +564,36 @@ var _ ServiceConfig = struct {
 	Web map[HostPort]*WebServerConfig `json:",omitempty"`
 	Tun bool                          `json:",omitempty"`
 }{}
+
+var _ TCPPortHandler = struct {
+	HTTPS         bool   `json:",omitempty"`
+	HTTP          bool   `json:",omitempty"`
+	TCPForward    string `json:",omitempty"`
+	TerminateTLS  string `json:",omitempty"`
+	CertFile      string `json:",omitempty"`
+	KeyFile       string `json:",omitempty"`
+	ProxyProtocol int    `json:",omitzero"`
+}{}
+
+func TestServeConfigHasManualCertificate(t *testing.T) {
+	manual := &TCPPortHandler{HTTPS: true, CertFile: "/cert.pem", KeyFile: "/key.pem"}
+	tests := []struct {
+		name string
+		sc   *ServeConfig
+		want bool
+	}{
+		{name: "nil"},
+		{name: "empty", sc: new(ServeConfig)},
+		{name: "automatic", sc: &ServeConfig{TCP: map[uint16]*TCPPortHandler{443: {HTTPS: true}}}},
+		{name: "node", sc: &ServeConfig{TCP: map[uint16]*TCPPortHandler{443: manual}}, want: true},
+		{name: "service", sc: &ServeConfig{Services: map[tailcfg.ServiceName]*ServiceConfig{"svc:web": {TCP: map[uint16]*TCPPortHandler{443: manual}}}}, want: true},
+		{name: "foreground", sc: &ServeConfig{Foreground: map[string]*ServeConfig{"session": {TCP: map[uint16]*TCPPortHandler{443: manual}}}}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.sc.HasManualCertificate(); got != tt.want {
+				t.Errorf("HasManualCertificate = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

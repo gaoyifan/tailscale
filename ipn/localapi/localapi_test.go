@@ -594,6 +594,26 @@ func TestShouldDenyServeConfigForGOOSAndUserContext(t *testing.T) {
 			h:       newHandler(false),
 			wantErr: true,
 		},
+		{
+			name: "manual-certificate-admin",
+			configIn: &ipn.ServeConfig{
+				TCP: map[uint16]*ipn.TCPPortHandler{
+					443: {HTTPS: true, CertFile: "/cert.pem", KeyFile: "/key.pem"},
+				},
+			},
+			h:       newHandler(true),
+			wantErr: false,
+		},
+		{
+			name: "manual-certificate-not-admin",
+			configIn: &ipn.ServeConfig{
+				TCP: map[uint16]*ipn.TCPPortHandler{
+					443: {HTTPS: true, CertFile: "/cert.pem", KeyFile: "/key.pem"},
+				},
+			},
+			h:       newHandler(false),
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

@@ -241,6 +241,8 @@ func newServeV2Command(e *serveEnv, subcmd serveMode) *ffcli.Command {
 			fs.UintVar(&e.https, "https", 0, "Expose an HTTPS server at the specified port (default mode)")
 			if subcmd == serve {
 				fs.UintVar(&e.http, "http", 0, "Expose an HTTP server at the specified port")
+				fs.StringVar(&e.certFile, "cert-file", "", "Use the PEM-encoded certificate file for TLS instead of an automatically provisioned certificate")
+				fs.StringVar(&e.keyFile, "key-file", "", "Use the PEM-encoded private key file for TLS instead of an automatically provisioned certificate")
 				fs.Var(&acceptAppCapsFlag{Value: &e.acceptAppCaps}, "accept-app-caps", "App capabilities to forward to the server (specify multiple capabilities with a comma-separated list)")
 				fs.Var(&serviceNameFlag{Value: &e.service}, "service", "Serve for a service with distinct virtual IP instead on node itself.")
 				fs.BoolVar(&e.tun, "tun", false, "Forward all traffic to the local machine (default false), only supported for services. Refer to docs for more information.")
@@ -420,11 +422,32 @@ func (e *serveEnv) runServeCombined(subcmd serveMode) execFunc {
 		if err != nil {
 			return fmt.Errorf("failed to clean the mount point: %w", err)
 		}
+		turnOff := len(args) > 0 && "off" == args[len(args)-1]
 
 		srvType, srvPort, err := srvTypeAndPortFromFlags(e)
 		if err != nil {
 			fmt.Fprintf(e.stderr(), "error: %v\n\n", err)
 			return errHelpFunc(subcmd)
+		}
+		manualCert := e.certFile != "" || e.keyFile != ""
+		if manualCert {
+			if turnOff {
+				return errors.New("--cert-file and --key-file cannot be used with off")
+			}
+			if e.certFile == "" || e.keyFile == "" {
+				return errors.New("--cert-file and --key-file must be specified together")
+			}
+			if srvType != serveTypeHTTPS && srvType != serveTypeTLSTerminatedTCP {
+				return errors.New("--cert-file and --key-file require HTTPS or TLS-terminated TCP")
+			}
+			e.certFile, err = filepath.Abs(e.certFile)
+			if err != nil {
+				return fmt.Errorf("resolving certificate file path: %w", err)
+			}
+			e.keyFile, err = filepath.Abs(e.keyFile)
+			if err != nil {
+				return fmt.Errorf("resolving private key file path: %w", err)
+			}
 		}
 
 		if (srvType == serveTypeHTTP || srvType == serveTypeHTTPS) && e.proxyProtocol != 0 {
@@ -457,8 +480,7 @@ func (e *serveEnv) runServeCombined(subcmd serveMode) execFunc {
 		// foreground or background.
 		parentSC := sc
 
-		turnOff := len(args) > 0 && "off" == args[len(args)-1]
-		if !turnOff && srvType == serveTypeHTTPS {
+		if !turnOff && srvType == serveTypeHTTPS && !manualCert {
 			// Running serve with https requires that the tailnet has enabled
 			// https cert provisioning. Send users through an interactive flow
 			// to enable this if not already done.
@@ -1016,6 +1038,11 @@ func (e *serveEnv) setServe(sc *ipn.ServeConfig, dnsName string, srvType serveTy
 		sc.Services[svcName].Tun = true
 	default:
 		return fmt.Errorf("invalid type %q", srvType)
+	}
+	if e.certFile != "" {
+		tcpHandler := sc.GetTCPPortHandler(srvPort, tailcfg.AsServiceName(dnsName))
+		tcpHandler.CertFile = e.certFile
+		tcpHandler.KeyFile = e.keyFile
 	}
 
 	// update the serve config based on if funnel is enabled

@@ -88,6 +88,7 @@ type serveHTTPContext struct {
 	SrcAddr       netip.AddrPort
 	ForVIPService tailcfg.ServiceName // "" means local
 	DestPort      uint16
+	ManualCert    bool // route HTTPS by port instead of the client's SNI name
 
 	// provides funnel-specific context, nil if not funneled
 	Funnel *funnelFlow
@@ -320,6 +321,9 @@ func generateServeConfigETag(sc ipn.ServeConfigView) (string, error) {
 // foreground listeners nor existing background listeners. Background config can
 // change as long as the serve type (e.g. HTTP, TCP, etc.) remains the same.
 func (b *LocalBackend) SetServeConfig(config *ipn.ServeConfig, etag string) error {
+	if err := validateServeManualCertificates(config); err != nil {
+		return err
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.setServeConfigLocked(config, etag)
@@ -646,16 +650,18 @@ func (b *LocalBackend) tcpHandlerForServe(dport uint16, srcAddr netip.AddrPort, 
 }
 
 func (b *LocalBackend) tcpHandlerForServeTCP(tcph ipn.TCPPortHandlerView, dport uint16, srcAddr netip.AddrPort, httpCtx *serveHTTPContext, forVIPService tailcfg.ServiceName) func(net.Conn) error {
+	manualCert := tcph.CertFile() != "" || tcph.KeyFile() != ""
 	if tcph.HTTPS() || tcph.HTTP() {
 		hs := &http.Server{
 			Handler: http.HandlerFunc(b.serveWebHandler),
 			BaseContext: func(_ net.Listener) context.Context {
 				c := *httpCtx
+				c.ManualCert = manualCert
 				return serveHTTPContextKey.WithValue(context.Background(), &c)
 			},
 		}
 		if tcph.HTTPS() {
-			hs.TLSConfig = b.serveTLSConfig(b.getTLSServeCertForPort(dport, forVIPService), serveTLSNextProtos())
+			hs.TLSConfig = b.serveTLSConfig(b.getTLSServeCertForPort(dport, forVIPService, tcph.CertFile(), tcph.KeyFile()), serveTLSNextProtos())
 			return func(c net.Conn) error {
 				c = b.meteredConnForService(c, forVIPService)
 				return hs.ServeTLS(netutil.NewOneConnListener(c, nil), "", "")
@@ -689,6 +695,9 @@ func (b *LocalBackend) tcpHandlerForServeTCP(tcph ipn.TCPPortHandlerView, dport 
 			defer backConn.Close()
 			if sni := tcph.TerminateTLS(); sni != "" {
 				conn = tls.Server(conn, b.serveTLSConfig(func(hi *tls.ClientHelloInfo) (*tls.Certificate, error) {
+					if manualCert {
+						return b.getManualServeCertificate(tcph.CertFile(), tcph.KeyFile())
+					}
 					if cert, ok := b.getACMETLSALPNCert(hi); ok {
 						return cert, nil
 					}
@@ -822,7 +831,12 @@ func (b *LocalBackend) getServeHandler(r *http.Request) (_ ipn.HTTPHandlerView, 
 		b.logf("[unexpected] localbackend: no serveHTTPContext in request")
 		return z, "", false
 	}
-	wsc, ok := b.webServerConfig(hostname, sctx.ForVIPService, sctx.DestPort)
+	var wsc ipn.WebServerConfigView
+	if sctx.ManualCert {
+		wsc, ok = b.webServerConfigForPort(sctx.ForVIPService, sctx.DestPort)
+	} else {
+		wsc, ok = b.webServerConfig(hostname, sctx.ForVIPService, sctx.DestPort)
+	}
 	if !ok {
 		return z, "", false
 	}
@@ -1338,8 +1352,56 @@ func (b *LocalBackend) webServerConfig(hostname string, forVIPService tailcfg.Se
 	return b.serveConfig.FindWeb(key)
 }
 
-func (b *LocalBackend) getTLSServeCertForPort(port uint16, forVIPService tailcfg.ServiceName) func(hi *tls.ClientHelloInfo) (*tls.Certificate, error) {
+func (b *LocalBackend) webServerConfigForPort(forVIPService tailcfg.ServiceName, port uint16) (c ipn.WebServerConfigView, ok bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.serveConfig.Valid() {
+		return c, false
+	}
+	if forVIPService != "" {
+		svc, svcFound := b.serveConfig.Services().GetOk(forVIPService)
+		if !svcFound {
+			return c, false
+		}
+		for hp, web := range svc.Web().All() {
+			if p, err := hp.Port(); err == nil && p == port {
+				if ok {
+					return ipn.WebServerConfigView{}, false
+				}
+				c, ok = web, true
+			}
+		}
+		return c, ok
+	}
+	for _, conf := range b.serveConfig.Foreground().All() {
+		for hp, web := range conf.Web().All() {
+			if p, err := hp.Port(); err == nil && p == port {
+				if ok {
+					return ipn.WebServerConfigView{}, false
+				}
+				c, ok = web, true
+			}
+		}
+	}
+	if ok {
+		return c, true
+	}
+	for hp, web := range b.serveConfig.Web().All() {
+		if p, err := hp.Port(); err == nil && p == port {
+			if ok {
+				return ipn.WebServerConfigView{}, false
+			}
+			c, ok = web, true
+		}
+	}
+	return c, ok
+}
+
+func (b *LocalBackend) getTLSServeCertForPort(port uint16, forVIPService tailcfg.ServiceName, certFile, keyFile string) func(hi *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	return func(hi *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		if certFile != "" || keyFile != "" {
+			return b.getManualServeCertificate(certFile, keyFile)
+		}
 		if hi == nil || hi.ServerName == "" {
 			return nil, errors.New("no SNI ServerName")
 		}
