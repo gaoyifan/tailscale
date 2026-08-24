@@ -717,6 +717,23 @@ func (e *serveEnv) runServeGetConfig(ctx context.Context, args []string) (err er
 		for port, config := range serviceConfig.TCP {
 			sniName := fmt.Sprintf("%s.%s", svcName.WithoutPrefix(), magicDNSSuffix)
 			ppr := tailcfg.ProtoPortRange{Proto: int(ipproto.TCP), Ports: tailcfg.PortRange{First: port, Last: port}}
+			if config.CertFile != "" || config.KeyFile != "" {
+				certificate := &conffile.TLSCertificate{
+					CertFile: config.CertFile,
+					KeyFile:  config.KeyFile,
+				}
+				if sdf.Certificate == nil {
+					sdf.Certificate = certificate
+				} else if *sdf.Certificate != *certificate {
+					return nil, fmt.Errorf("service %q uses different manual certificates", svcName)
+				}
+			}
+			setEndpoint := func(target *conffile.Target) {
+				if config.HTTPS || config.TerminateTLS != "" || config.CertFile != "" || config.KeyFile != "" {
+					target.TLS = true
+				}
+				mak.Set(&sdf.Endpoints, &ppr, target)
+			}
 			if config.TCPForward != "" {
 				var proto conffile.ServiceProtocol
 				if config.TerminateTLS != "" {
@@ -725,7 +742,7 @@ func (e *serveEnv) runServeGetConfig(ctx context.Context, args []string) (err er
 					proto = conffile.ProtoTCP
 				}
 				if strings.HasPrefix(config.TCPForward, "unix:") {
-					mak.Set(&sdf.Endpoints, &ppr, &conffile.Target{
+					setEndpoint(&conffile.Target{
 						Protocol:    proto,
 						Destination: config.TCPForward,
 					})
@@ -738,7 +755,7 @@ func (e *serveEnv) runServeGetConfig(ctx context.Context, args []string) (err er
 					if err != nil {
 						return nil, fmt.Errorf("parse port %q: %w", destPortStr, err)
 					}
-					mak.Set(&sdf.Endpoints, &ppr, &conffile.Target{
+					setEndpoint(&conffile.Target{
 						Protocol:         proto,
 						Destination:      destHost,
 						DestinationPorts: tailcfg.PortRange{First: uint16(destPort), Last: uint16(destPort)},
@@ -755,7 +772,7 @@ func (e *serveEnv) runServeGetConfig(ctx context.Context, args []string) (err er
 					return nil, fmt.Errorf("service %q: root handler not set", svcName)
 				}
 				if defaultHandler.Path != "" {
-					mak.Set(&sdf.Endpoints, &ppr, &conffile.Target{
+					setEndpoint(&conffile.Target{
 						Protocol:         conffile.ProtoFile,
 						Destination:      defaultHandler.Path,
 						DestinationPorts: tailcfg.PortRange{},
@@ -768,7 +785,7 @@ func (e *serveEnv) runServeGetConfig(ctx context.Context, args []string) (err er
 						if config.HTTPS {
 							httpProto = conffile.ProtoHTTPS
 						}
-						mak.Set(&sdf.Endpoints, &ppr, &conffile.Target{
+						setEndpoint(&conffile.Target{
 							Protocol:    httpProto,
 							Destination: defaultHandler.Proxy,
 						})
@@ -787,7 +804,7 @@ func (e *serveEnv) runServeGetConfig(ctx context.Context, args []string) (err er
 							return nil, fmt.Errorf("service %q: parse port %q: %w", svcName, portStr, err)
 						}
 
-						mak.Set(&sdf.Endpoints, &ppr, &conffile.Target{
+						setEndpoint(&conffile.Target{
 							Protocol:         conffile.ServiceProtocol(proto),
 							Destination:      host,
 							DestinationPorts: tailcfg.PortRange{First: uint16(port), Last: uint16(port)},
@@ -955,6 +972,14 @@ func (e *serveEnv) runServeSetConfig(ctx context.Context, args []string) (err er
 				return fmt.Errorf("service %q: source ports must be TCP", name)
 			}
 			serveType, _ := serveTypeFromConfString(ep.Protocol)
+			if ep.TLS {
+				switch serveType {
+				case serveTypeHTTP:
+					serveType = serveTypeHTTPS
+				case serveTypeTCP:
+					serveType = serveTypeTLSTerminatedTCP
+				}
+			}
 			for port := ppr.Ports.First; port <= ppr.Ports.Last; port++ {
 				var target string
 				if ep.Protocol == conffile.ProtoFile {
@@ -972,6 +997,11 @@ func (e *serveEnv) runServeSetConfig(ctx context.Context, args []string) (err er
 				err := e.setServe(sc, name.String(), serveType, port, "/", target, false, magicDNSSuffix, nil, 0 /* proxy protocol */)
 				if err != nil {
 					return fmt.Errorf("service %q: %w", name, err)
+				}
+				if details.Certificate != nil && (serveType == serveTypeHTTPS || serveType == serveTypeTLSTerminatedTCP) {
+					handler := sc.GetTCPPortHandler(port, name)
+					handler.CertFile = details.Certificate.CertFile
+					handler.KeyFile = details.Certificate.KeyFile
 				}
 			}
 		}

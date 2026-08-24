@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	jsonv2 "github.com/go-json-experiment/json"
@@ -62,6 +63,11 @@ type ServiceDetailsFile struct {
 	// interface with the understanding that the user will deal with them manually.
 	Endpoints map[*tailcfg.ProtoPortRange]*Target `json:"endpoints"`
 
+	// Certificate selects a certificate managed outside Tailscale for TLS
+	// endpoints in this service. When unset, TLS endpoints use an automatically
+	// provisioned certificate.
+	Certificate *TLSCertificate `json:"certificate,omitzero"`
+
 	// Advertised is a flag that tells control whether or not the client thinks
 	// it is ready to host a particular Tailscale Service. If unset, it is
 	// assumed to be true.
@@ -103,6 +109,21 @@ type Target struct {
 	// For unix socket targets (Destination starting with "unix:"),
 	// DestinationPorts is unused and left at the zero value.
 	DestinationPorts tailcfg.PortRange
+
+	// TLS enables TLS termination on the service endpoint independently of the
+	// protocol used to reach the destination.
+	TLS bool
+}
+
+// TLSCertificate identifies a certificate managed outside Tailscale.
+type TLSCertificate struct {
+	CertFile string `json:"certFile,omitzero"`
+	KeyFile  string `json:"keyFile,omitzero"`
+}
+
+type targetJSON struct {
+	Target string `json:"target"`
+	TLS    bool   `json:"tls,omitzero"`
 }
 
 // UnmarshalJSON implements [jsonv1.Unmarshaler].
@@ -112,9 +133,25 @@ func (t *Target) UnmarshalJSON(buf []byte) error {
 
 // UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
 func (t *Target) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	*t = Target{}
 	var str string
-	if err := jsonv2.UnmarshalDecode(dec, &str); err != nil {
-		return err
+	switch dec.PeekKind() {
+	case '"':
+		if err := jsonv2.UnmarshalDecode(dec, &str); err != nil {
+			return err
+		}
+	case '{':
+		var obj targetJSON
+		if err := jsonv2.UnmarshalDecode(dec, &obj); err != nil {
+			return err
+		}
+		if obj.Target == "" {
+			return errors.New("endpoint object is missing target")
+		}
+		str = obj.Target
+		t.TLS = obj.TLS
+	default:
+		return errors.New("endpoint must be a target string or object")
 	}
 
 	// The TUN case does not look like a standard <url>://<proto> arrangement,
@@ -159,6 +196,23 @@ func (t *Target) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	}
 
 	return nil
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (t *Target) MarshalJSON() ([]byte, error) {
+	return jsonv2.Marshal(t)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (t *Target) MarshalJSONTo(enc *jsontext.Encoder) error {
+	target, err := t.MarshalText()
+	if err != nil {
+		return err
+	}
+	if !t.TLS {
+		return jsonv2.MarshalEncode(enc, string(target))
+	}
+	return jsonv2.MarshalEncode(enc, targetJSON{Target: string(target), TLS: t.TLS})
 }
 
 func (t *Target) MarshalText() ([]byte, error) {
@@ -260,6 +314,7 @@ func loadConfigV0(json []byte, forService string) (*ServicesConfigFile, error) {
 			return nil, err
 		}
 	}
+	var manualCert *TLSCertificate
 	for svcName, svc := range scf.Services {
 		if forService == "" && svc.Version != "" {
 			return nil, errors.New("services cannot be versioned separately from config file")
@@ -270,10 +325,33 @@ func loadConfigV0(json []byte, forService string) (*ServicesConfigFile, error) {
 		if svc.Endpoints == nil {
 			return nil, fmt.Errorf("service %q: missing \"endpoints\" field", svcName)
 		}
+		if svc.Certificate != nil {
+			if svc.Certificate.CertFile == "" || svc.Certificate.KeyFile == "" {
+				return nil, fmt.Errorf("service %q: certificate.certFile and certificate.keyFile must both be set", svcName)
+			}
+			if !filepath.IsAbs(svc.Certificate.CertFile) || !filepath.IsAbs(svc.Certificate.KeyFile) {
+				return nil, fmt.Errorf("service %q: certificate.certFile and certificate.keyFile must be absolute paths", svcName)
+			}
+			if manualCert == nil {
+				manualCert = svc.Certificate
+			} else if *manualCert != *svc.Certificate {
+				return nil, errors.New("all service certificates must use the same certFile and keyFile")
+			}
+		}
 		var sourcePorts []tailcfg.PortRange
 		foundTUN := false
 		foundNonTUN := false
+		foundTLS := false
 		for ppr, target := range svc.Endpoints {
+			if target.TLS {
+				if target.Protocol == ProtoTUN {
+					return nil, fmt.Errorf("service %q: TLS cannot be used with destination TUN", svcName)
+				}
+			}
+			if target.TLS || target.Protocol == ProtoHTTPS || target.Protocol == ProtoHTTPSInsecure ||
+				target.Protocol == ProtoTLSTerminatedTCP || target.Protocol == ProtoFile {
+				foundTLS = true
+			}
 			if target.Protocol == "TUN" {
 				if ppr.Proto != 0 || ppr.Ports != tailcfg.PortRangeAny {
 					return nil, fmt.Errorf("service %q: destination \"TUN\" can only be used with source \"*\"", svcName)
@@ -303,6 +381,9 @@ func loadConfigV0(json []byte, forService string) (*ServicesConfigFile, error) {
 				return nil, fmt.Errorf("service %q: source port ranges %q and %q overlap", svcName, pr.String(), ppr.Ports.String())
 			}
 			sourcePorts = append(sourcePorts, ppr.Ports)
+		}
+		if svc.Certificate != nil && !foundTLS {
+			return nil, fmt.Errorf("service %q: certificate requires at least one TLS endpoint", svcName)
 		}
 	}
 	return &scf, nil

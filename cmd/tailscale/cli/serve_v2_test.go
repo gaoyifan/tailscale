@@ -2669,6 +2669,100 @@ func TestRunServeSetConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("new_format_manual_tls_roundtrip", func(t *testing.T) {
+		lc := &fakeLocalServeClient{config: &ipn.ServeConfig{}}
+		var stdout, stderr bytes.Buffer
+		e := &serveEnv{lc: lc, allServices: true, testStdout: &stdout, testStderr: &stderr}
+		path := writeTmpServeConfig(t, `{
+			"version":"0.0.1",
+			"services":{
+				"svc:foo":{
+					"certificate":{"certFile":"/cert.pem","keyFile":"/key.pem"},
+					"endpoints":{
+						"tcp:443":{
+							"target":"http://localhost:8000",
+							"tls":true
+						},
+						"tcp:80":"http://localhost:8080"
+					}
+				}
+			}
+		}`)
+
+		if err := e.runServeSetConfig(context.Background(), []string{path}); err != nil {
+			t.Fatal(err)
+		}
+		svc := lc.config.Services[fooSvc]
+		if svc == nil {
+			t.Fatalf("svc:foo not applied; got %+v", lc.config.Services)
+		}
+		handler := svc.TCP[443]
+		if handler == nil || !handler.HTTPS || handler.CertFile != "/cert.pem" || handler.KeyFile != "/key.pem" {
+			t.Errorf("TCP/443 = %+v, want HTTPS with manual certificate", handler)
+		}
+		if got := svc.Web["foo.test.ts.net:443"].Handlers["/"].Proxy; got != "http://localhost:8000" {
+			t.Errorf("proxy target = %q, want http://localhost:8000", got)
+		}
+		plain := svc.TCP[80]
+		if plain == nil || !plain.HTTP || plain.CertFile != "" || plain.KeyFile != "" {
+			t.Errorf("TCP/80 = %+v, want plain HTTP without a certificate", plain)
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("new format must not warn; stderr:\n%s", stderr.String())
+		}
+
+		var configOut, getStderr bytes.Buffer
+		g := &serveEnv{lc: lc, allServices: true, testStdout: &configOut, testStderr: &getStderr}
+		if err := g.runServeGetConfig(context.Background(), nil); err != nil {
+			t.Fatalf("get-config: %v", err)
+		}
+		if getStderr.Len() != 0 {
+			t.Errorf("get-config stderr:\n%s", getStderr.String())
+		}
+		gotConfig := configOut.String()
+		for _, want := range []string{
+			`"target": "http://localhost:8000"`,
+			`"tls": true`,
+			`"certificate": {`,
+			`"certFile": "/cert.pem"`,
+			`"keyFile": "/key.pem"`,
+		} {
+			if !strings.Contains(gotConfig, want) {
+				t.Errorf("get-config output missing %s:\n%s", want, gotConfig)
+			}
+		}
+
+		roundTrip := &fakeLocalServeClient{config: &ipn.ServeConfig{}}
+		r := &serveEnv{lc: roundTrip, allServices: true, testStdout: &bytes.Buffer{}, testStderr: &bytes.Buffer{}}
+		roundTripPath := writeTmpServeConfig(t, gotConfig)
+		if err := r.runServeSetConfig(context.Background(), []string{roundTripPath}); err != nil {
+			t.Fatalf("set-config round trip: %v", err)
+		}
+		if diff := cmp.Diff(lc.config, roundTrip.config); diff != "" {
+			t.Errorf("ServeConfig round trip mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("new_format_manual_tls_requires_pair", func(t *testing.T) {
+		lc := &fakeLocalServeClient{config: &ipn.ServeConfig{}}
+		e := &serveEnv{lc: lc, allServices: true, testStdout: &bytes.Buffer{}, testStderr: &bytes.Buffer{}}
+		path := writeTmpServeConfig(t, `{
+			"version":"0.0.1",
+			"services":{"svc:foo":{
+				"certificate":{"certFile":"/cert.pem"},
+				"endpoints":{"tcp:443":{"target":"http://localhost:8000","tls":true}}
+			}}
+		}`)
+
+		err := e.runServeSetConfig(context.Background(), []string{path})
+		if err == nil || !strings.Contains(err.Error(), "must both be set") {
+			t.Fatalf("err = %v, want paired certificate error", err)
+		}
+		if lc.setCount != 0 {
+			t.Errorf("setCount = %d, want 0", lc.setCount)
+		}
+	})
+
 	t.Run("new_format_single_service_no_warning", func(t *testing.T) {
 		lc := &fakeLocalServeClient{config: &ipn.ServeConfig{}}
 		var stdout, stderr bytes.Buffer
@@ -2743,7 +2837,8 @@ func TestRunServeSetConfig(t *testing.T) {
 		if err := g.runServeGetConfig(context.Background(), nil); err != nil {
 			t.Fatalf("get-config: %v", err)
 		}
-		if !strings.Contains(gotStdout.String(), `"tcp:443": "https://unix:/var/run/app.sock"`) {
+		if !strings.Contains(gotStdout.String(), `"target": "https://unix:/var/run/app.sock"`) ||
+			!strings.Contains(gotStdout.String(), `"tls": true`) {
 			t.Errorf("get-config output missing https-over-unix target:\n%s", gotStdout.String())
 		}
 	})

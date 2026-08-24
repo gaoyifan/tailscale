@@ -25,6 +25,40 @@ The two flags must be used together. They are supported for HTTPS and
 TLS-terminated TCP listeners, but not for plain HTTP, unterminated TCP, or
 Tailscale Funnel.
 
+## Services configuration files
+
+In a versioned Services configuration file, use an endpoint object to keep
+the incoming TLS settings separate from the local target protocol:
+
+```json
+{
+  "version": "0.0.1",
+  "services": {
+    "svc:web": {
+      "certificate": {
+        "certFile": "/etc/tailscale/serve/fullchain.pem",
+        "keyFile": "/etc/tailscale/serve/private-key.pem"
+      },
+      "endpoints": {
+        "tcp:443": {
+          "target": "http://127.0.0.1:3000",
+          "tls": true
+        },
+        "tcp:80": "http://127.0.0.1:3000"
+      }
+    }
+  }
+}
+```
+
+Apply the file with `tailscale serve set-config --all FILE`. The `target`
+field describes the connection from Serve to the destination. The presence of
+`"tls": true` enables TLS on the incoming service endpoint. The service-level
+`certificate` is used by its TLS endpoints; HTTP and unterminated TCP endpoints
+ignore it. Without `certificate`, TLS endpoints use automatically provisioned
+certificates. Endpoints without explicit TLS can continue using the existing
+string form.
+
 ## Custom domain names
 
 A manual certificate can contain any domain name. Serve does not create or
