@@ -579,7 +579,7 @@ func (c *singlePacketConn) ReadBatch(msgs []ipv6.Message, _ int) (int, error) {
 	return 1, nil
 }
 
-func (c *singlePacketConn) WriteBatchTo(buffs [][]byte, addr netip.AddrPort, geneve packet.GeneveHeader, offset int) error {
+func (c *singlePacketConn) WriteBatchTo(buffs [][]byte, addr netip.AddrPort, _ netip.Addr, geneve packet.GeneveHeader, offset int) error {
 	for _, buff := range buffs {
 		if geneve.VNI.IsSet() {
 			geneve.Encode(buff)
@@ -950,9 +950,9 @@ func (s *Server) packetReadLoop(readFromSocket, otherSocket batching.Conn, readF
 			// received, otherwise we use the "other" socket. [Server] makes no
 			// use of dual-stack sockets.
 			if dest.Addr().Is4() == readFromSocketIsIPv4 {
-				readFromSocket.WriteBatchTo(buffs, dest, packet.GeneveHeader{}, 0)
+				readFromSocket.WriteBatchTo(buffs, dest, netip.Addr{}, packet.GeneveHeader{}, 0)
 			} else {
-				otherSocket.WriteBatchTo(buffs, dest, packet.GeneveHeader{}, 0)
+				otherSocket.WriteBatchTo(buffs, dest, netip.Addr{}, packet.GeneveHeader{}, 0)
 			}
 			delete(writeBuffsByDest, dest)
 		}

@@ -4,6 +4,8 @@
 package magicsock
 
 import (
+	"net/netip"
+
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 	"tailscale.com/util/set"
@@ -102,6 +104,7 @@ func (m *peerMap) endpointForNodeID(nodeID tailcfg.NodeID) (ep *endpoint, ok boo
 // endpointForEpAddr returns the endpoint for the peer we
 // believe to be at addr, or nil if we don't know of any such peer.
 func (m *peerMap) endpointForEpAddr(addr epAddr) (ep *endpoint, ok bool) {
+	addr.localIP = netip.Addr{}
 	if info, ok := m.byEpAddr[addr]; ok {
 		return info.ep, true
 	}
@@ -185,6 +188,7 @@ func (m *peerMap) upsertEndpoint(ep *endpoint, oldDiscoKey key.DiscoPublic) {
 // nk, because calling this function defines the endpoint we hand to
 // WireGuard for packets received from addr.
 func (m *peerMap) setNodeKeyForEpAddr(addr epAddr, nk key.NodePublic) {
+	addr.localIP = netip.Addr{}
 	if pi := m.byEpAddr[addr]; pi != nil {
 		delete(pi.epAddrs, addr)
 		delete(m.byEpAddr, addr)

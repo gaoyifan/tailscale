@@ -6,14 +6,210 @@ package magicsock
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"fmt"
+	"net"
 	"net/netip"
+	"syscall"
 	"testing"
+	"time"
 
+	"github.com/tailscale/wireguard-go/conn"
 	"golang.org/x/net/bpf"
 	"golang.org/x/sys/cpu"
 	"golang.org/x/sys/unix"
 	"tailscale.com/disco"
+	"tailscale.com/net/packet"
+	"tailscale.com/net/stun"
+	"tailscale.com/tailcfg"
+	"tailscale.com/tstest"
+	"tailscale.com/tstime/mono"
+	"tailscale.com/types/key"
 )
+
+// TestDiscoReplySource uses one remote socket to probe two local addresses.
+// A wildcard UDP listener must reply from the address that received each ping,
+// even when the default route would choose a different source address.
+func TestDiscoReplySource(t *testing.T) {
+	for _, tc := range []struct {
+		network, peerIP string
+		localIPs        []string
+	}{
+		{"udp4", "127.0.0.1", []string{"127.0.0.2", "127.0.0.3", "127.0.0.2"}},
+		{"udp6", "2001:db8:1::1", []string{"2001:db8:1::2", "2001:db8:1::3", "2001:db8:1::2"}},
+	} {
+		t.Run(tc.network, func(t *testing.T) {
+			c := newTestConn(t)
+			c.mu.Lock()
+			c.testOnlyPacketListener = &net.ListenConfig{}
+			c.mu.Unlock()
+			c.Rebind()
+
+			peer, err := net.ListenUDP(tc.network, &net.UDPAddr{IP: net.ParseIP(tc.peerIP)})
+			if err != nil {
+				if tc.network == "udp6" && errors.Is(err, syscall.EADDRNOTAVAIL) {
+					t.Skip("requires 2001:db8:1::{1,2,3} on loopback in the test network namespace")
+				}
+				t.Fatal(err)
+			}
+			defer peer.Close()
+			peerDisco := key.NewDisco()
+			peerKey := key.NewNode().Public()
+			c.SetNetworkMap(tailcfg.NodeView{}, nodeViews([]*tailcfg.Node{{
+				ID: 1, Key: peerKey, DiscoKey: peerDisco.Public(),
+				Endpoints: []netip.AddrPort{peer.LocalAddr().(*net.UDPAddr).AddrPort()},
+			}}))
+			c.SetPrivateKey(key.NewNode())
+
+			ruc := &c.pconn4
+			receive := c.receiveIPv4()
+			if tc.network == "udp6" {
+				ruc, receive = &c.pconn6, c.receiveIPv6()
+			}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				buffs := make([][]byte, c.bind.BatchSize())
+				for i := range buffs {
+					buffs[i] = make([]byte, 2048)
+				}
+				receive(buffs, make([]int, len(buffs)), make([]conn.Endpoint, len(buffs)))
+			}()
+			t.Cleanup(func() {
+				c.Close()
+				<-done
+			})
+
+			shared := peerDisco.Shared(c.discoAtomic.Public())
+			sendDisco := func(dst netip.AddrPort, m disco.Message) {
+				t.Helper()
+				msg := peerDisco.Public().AppendTo([]byte(disco.Magic))
+				msg = append(msg, shared.Seal(m.AppendMarshal(nil))...)
+				if _, err := peer.WriteToUDPAddrPort(msg, dst); err != nil {
+					t.Fatal(err)
+				}
+			}
+			seenPongs := make(map[stun.TxID]netip.AddrPort)
+			read := func() ([]byte, netip.AddrPort, disco.Message) {
+				t.Helper()
+				peer.SetReadDeadline(time.Now().Add(2 * time.Second))
+				for {
+					buf := make([]byte, 2048)
+					n, from, err := peer.ReadFromUDPAddrPort(buf)
+					if err != nil {
+						t.Fatal(err)
+					}
+					buf = buf[:n]
+					if !disco.LooksLikeDiscoWrapper(buf) {
+						return buf, from, nil
+					}
+					payload, ok := shared.Open(buf[discoHeaderLen:])
+					if !ok {
+						t.Fatal("could not decrypt disco message")
+					}
+					m, err := disco.Parse(payload)
+					if err != nil {
+						t.Fatal(err)
+					}
+					// Raw and UDP receivers can both answer the same probe.
+					if pong, ok := m.(*disco.Pong); ok {
+						if prev, seen := seenPongs[pong.TxID]; seen {
+							if prev != from {
+								t.Errorf("duplicate pong from %v, first reply from %v", from, prev)
+							}
+							continue
+						}
+						seenPongs[pong.TxID] = from
+					}
+					return buf, from, m
+				}
+			}
+
+			// Probe both addresses before reading either response, so an
+			// address remembered globally for the remote socket is insufficient.
+			pending := make(map[stun.TxID]netip.AddrPort)
+			for _, ip := range tc.localIPs[:2] {
+				dst := netip.AddrPortFrom(netip.MustParseAddr(ip), ruc.Port())
+				ping := &disco.Ping{TxID: stun.NewTxID()}
+				pending[ping.TxID] = dst
+				sendDisco(dst, ping)
+			}
+			for range 2 {
+				_, from, m := read()
+				pong, ok := m.(*disco.Pong)
+				if !ok {
+					t.Fatalf("reply = %v, want pong", m)
+				}
+				if dst := pending[pong.TxID]; from != dst {
+					t.Errorf("ping to %v: reply from %v", dst, from)
+				}
+				delete(pending, pong.TxID)
+			}
+
+			c.mu.Lock()
+			ep, _ := c.peerMap.endpointForNodeKey(peerKey)
+			c.mu.Unlock()
+			for _, ip := range tc.localIPs {
+				dst := netip.AddrPortFrom(netip.MustParseAddr(ip), ruc.Port())
+				ping := &disco.Ping{TxID: stun.NewTxID()}
+				sendDisco(dst, ping)
+				_, from, m := read()
+				if from != dst {
+					t.Errorf("ping to %v: reply from %v", dst, from)
+				}
+				pong, ok := m.(*disco.Pong)
+				if !ok || pong.TxID != ping.TxID {
+					t.Fatalf("reply = %v, want pong for %v", m, ping.TxID)
+				}
+
+				// The reciprocal probe and selected data path must keep the same
+				// local address, rather than consulting the default route again.
+				ep.mu.Lock()
+				ep.clearBestAddrLocked()
+				ep.startDiscoPingLocked(epAddr{ap: peer.LocalAddr().(*net.UDPAddr).AddrPort()}, mono.Now(), pingDiscovery, 0, nil)
+				ep.mu.Unlock()
+				_, from, m = read()
+				if from != dst {
+					t.Errorf("probe from %v, want %v", from, dst)
+				}
+				probe, ok := m.(*disco.Ping)
+				if !ok {
+					t.Fatal("expected reciprocal ping")
+				}
+				sendDisco(dst, &disco.Pong{TxID: probe.TxID, Src: dst})
+				if err := tstest.WaitFor(time.Second, func() error {
+					ep.mu.Lock()
+					defer ep.mu.Unlock()
+					if ep.bestAddr.localIP != dst.Addr() {
+						return fmt.Errorf("best local address = %v, want %v", ep.bestAddr.localIP, dst.Addr())
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+				for _, count := range []int{1, 8} {
+					buffs := make([][]byte, count)
+					for i := range buffs {
+						buffs[i] = make([]byte, packet.GeneveFixedHeaderLength+128)
+						buffs[i][packet.GeneveFixedHeaderLength] = 4 // WireGuard transport message
+					}
+					if err := c.Send(buffs, ep, packet.GeneveFixedHeaderLength); err != nil {
+						t.Fatal(err)
+					}
+					for i := range count {
+						got, from, _ := read()
+						if from != dst {
+							t.Errorf("data from %v, want %v", from, dst)
+						}
+						if !bytes.Equal(got, buffs[i][packet.GeneveFixedHeaderLength:]) {
+							t.Fatalf("data packet = %x, want %x", got, buffs[i][packet.GeneveFixedHeaderLength:])
+						}
+					}
+				}
+			}
+		})
+	}
+}
 
 func TestParseUDPPacket(t *testing.T) {
 	src4 := netip.MustParseAddrPort("127.0.0.1:12345")

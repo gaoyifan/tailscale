@@ -1563,11 +1563,12 @@ func (c *Conn) sendUDPBatch(addr epAddr, buffs [][]byte, offset int) (sent bool,
 
 // sendUDP sends UDP packet b to ipp.
 // See sendAddr's docs on the return value meanings.
-func (c *Conn) sendUDP(ipp netip.AddrPort, b []byte, isDisco bool, isGeneveEncap bool) (sent bool, err error) {
+func (c *Conn) sendUDP(addr epAddr, b []byte, isDisco bool, isGeneveEncap bool) (sent bool, err error) {
 	if runtime.GOOS == "js" {
 		return false, errNoUDP
 	}
-	sent, err = c.sendUDPStd(ipp, b)
+	ipp := addr.ap
+	sent, err = c.sendUDPStd(addr, b)
 	if err != nil {
 		if isGeneveEncap {
 			metricSendPeerRelayError.Add(1)
@@ -1638,18 +1639,18 @@ func (c *Conn) sendUDPNetcheck(b []byte, addr netip.AddrPort) (int, error) {
 
 // sendUDPStd sends UDP packet b to addr.
 // See sendAddr's docs on the return value meanings.
-func (c *Conn) sendUDPStd(addr netip.AddrPort, b []byte) (sent bool, err error) {
+func (c *Conn) sendUDPStd(addr epAddr, b []byte) (sent bool, err error) {
 	if c.onlyTCP443.Load() {
 		return false, nil
 	}
 	switch {
-	case addr.Addr().Is4():
-		_, err = c.pconn4.WriteToUDPAddrPort(b, addr)
+	case addr.ap.Addr().Is4():
+		_, err = c.pconn4.writeToUDPAddrPort(b, addr)
 		if err != nil && (c.noV4.Load() || neterror.TreatAsLostUDP(err)) {
 			return false, nil
 		}
-	case addr.Addr().Is6():
-		_, err = c.pconn6.WriteToUDPAddrPort(b, addr)
+	case addr.ap.Addr().Is6():
+		_, err = c.pconn6.writeToUDPAddrPort(b, addr)
 		if err != nil && (c.noV6.Load() || neterror.TreatAsLostUDP(err)) {
 			return false, nil
 		}
@@ -1669,12 +1670,12 @@ func (c *Conn) sendUDPStd(addr netip.AddrPort, b []byte) (sent bool, err error) 
 // An example of when they might be different: sending to an
 // IPv6 address when the local machine doesn't have IPv6 support
 // returns (false, nil); it's not an error, but nothing was sent.
-func (c *Conn) sendAddr(addr netip.AddrPort, pubKey key.NodePublic, b []byte, isDisco bool, isGeneveEncap bool) (sent bool, err error) {
-	if addr.Addr() != tailcfg.DerpMagicIPAddr {
+func (c *Conn) sendAddr(addr epAddr, pubKey key.NodePublic, b []byte, isDisco bool, isGeneveEncap bool) (sent bool, err error) {
+	if addr.ap.Addr() != tailcfg.DerpMagicIPAddr {
 		return c.sendUDP(addr, b, isDisco, isGeneveEncap)
 	}
 
-	regionID := int(addr.Port())
+	regionID := int(addr.ap.Port())
 	ch := c.derpWriteChanForRegion(regionID, pubKey)
 	if ch == nil {
 		metricSendDERPErrorChan.Add(1)
@@ -1688,7 +1689,7 @@ func (c *Conn) sendAddr(addr netip.AddrPort, pubKey key.NodePublic, b []byte, is
 	// internal locks.
 	pkt := bytes.Clone(b)
 
-	wr := derpWriteRequest{addr, pubKey, pkt, isDisco}
+	wr := derpWriteRequest{addr.ap, pubKey, pkt, isDisco}
 	for range 3 {
 		select {
 		case <-c.donec:
@@ -1788,7 +1789,8 @@ func (c *Conn) mkReceiveFunc(ruc *RebindingUDPConn, healthItem *health.ReceiveFu
 					continue
 				}
 				ipp := msg.Addr.(*net.UDPAddr).AddrPort()
-				if ep, size, isGeneveEncap, ok := c.receiveIP(msg.Buffers[0][:msg.N], ipp, &epCache); ok {
+				src := epAddr{ap: ipp, localIP: batching.LocalAddrFromControl(msg.OOB[:msg.NN])}
+				if ep, size, isGeneveEncap, ok := c.receiveIP(msg.Buffers[0][:msg.N], src, &epCache); ok {
 					if isGeneveEncap {
 						if peerRelayPacketMetric != nil {
 							peerRelayPacketMetric.Add(1)
@@ -1835,13 +1837,13 @@ func looksLikeInitiationMsg(b []byte) bool {
 //
 // ok is whether this read should be reported up to wireguard-go (our
 // caller).
-func (c *Conn) receiveIP(b []byte, ipp netip.AddrPort, cache *epAddrEndpointCache) (_ conn.Endpoint, size int, isGeneveEncap bool, ok bool) {
+func (c *Conn) receiveIP(b []byte, src epAddr, cache *epAddrEndpointCache) (_ conn.Endpoint, size int, isGeneveEncap bool, ok bool) {
 	var ep *endpoint
 	size = len(b)
+	ipp := src.ap
 
 	var geneve packet.GeneveHeader
 	pt, isGeneveEncap := packetLooksLike(b)
-	src := epAddr{ap: ipp}
 	if isGeneveEncap {
 		err := geneve.Decode(b)
 		if err != nil {
@@ -2038,7 +2040,7 @@ func (c *Conn) sendDiscoMessage(dst epAddr, dstKey key.NodePublic, dstDisco key.
 	box := di.sharedKey.Seal(m.AppendMarshal(nil))
 	pkt = append(pkt, box...)
 	const isDisco = true
-	sent, err = c.sendAddr(dst.ap, dstKey, pkt, isDisco, dst.vni.IsSet())
+	sent, err = c.sendAddr(dst, dstKey, pkt, isDisco, dst.vni.IsSet())
 	if sent {
 		if logLevel == discoLog || (logLevel == discoVerboseLog && debugDisco()) {
 			node := "?"
@@ -2239,9 +2241,9 @@ func (c *Conn) handleDiscoMessage(msg []byte, src epAddr, shouldBeRelayHandshake
 	isDERP := src.ap.Addr() == tailcfg.DerpMagicIPAddr
 	if !isDERP && !shouldBeRelayHandshakeMsg {
 		// Record receive time for UDP transport packets.
-		pi, ok := c.peerMap.byEpAddr[src]
+		ep, ok := c.peerMap.endpointForEpAddr(src)
 		if ok {
-			pi.ep.lastRecvUDPAny.StoreAtomic(mono.Now())
+			ep.lastRecvUDPAny.StoreAtomic(mono.Now())
 		}
 	}
 
@@ -2602,7 +2604,7 @@ func (c *Conn) handlePingLocked(dm *disco.Ping, src epAddr, di *discoInfo, derpN
 		}
 	} else {
 		c.peerMap.forEachEndpointWithDiscoKey(di.discoKey, func(ep *endpoint) (keepGoing bool) {
-			if ep.addCandidateEndpoint(src.ap, dm.TxID) {
+			if ep.addCandidateEndpoint(src, dm.TxID) {
 				dup = true
 				return false
 			}

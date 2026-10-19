@@ -272,7 +272,7 @@ func (c *linuxBatchingConn) putSendBatch(batch *sendBatch) {
 // 29/480 = 0.060...
 const appendSentinelTailBatchSizeThreshold = 8
 
-func (c *linuxBatchingConn) WriteBatchTo(buffs [][]byte, addr netip.AddrPort, geneve packet.GeneveHeader, offset int) error {
+func (c *linuxBatchingConn) WriteBatchTo(buffs [][]byte, addr netip.AddrPort, localIP netip.Addr, geneve packet.GeneveHeader, offset int) error {
 	batch := c.getSendBatch()
 	defer c.putSendBatch(batch)
 	if addr.Addr().Is6() {
@@ -314,6 +314,11 @@ retry:
 			batch.msgs[i].OOB = batch.msgs[i].OOB[:0]
 		}
 		n = len(buffs)
+	}
+	if localIP.IsValid() {
+		for i := range n {
+			batch.msgs[i].OOB = appendSourceControl(batch.msgs[i].OOB, localIP)
+		}
 	}
 
 	err := c.writeBatch(batch.msgs[:n])
@@ -379,6 +384,7 @@ func (c *linuxBatchingConn) splitCoalescedMessages(msgs []ipv6.Message, firstMsg
 			copied := copy(msgs[n].Buffers[0], msg.Buffers[0][start:end])
 			msgs[n].N = copied
 			msgs[n].Addr = msg.Addr
+			msgs[n].NN = copy(msgs[n].OOB, msg.OOB[:msg.NN])
 			start = end
 			end += gsoSize
 			if end > msg.N {
@@ -420,6 +426,41 @@ func getDataFromControl(control []byte, cmsgLevel, cmsgType int32, minDataLen in
 		}
 	}
 	return nil, nil
+}
+
+// LocalAddrFromControl returns the destination address of a received datagram.
+func LocalAddrFromControl(control []byte) netip.Addr {
+	if data, _ := getDataFromControl(control, unix.IPPROTO_IP, unix.IP_PKTINFO, unix.SizeofInet4Pktinfo); data != nil {
+		return netip.AddrFrom4((*unix.Inet4Pktinfo)(unsafe.Pointer(&data[0])).Addr)
+	}
+	if data, _ := getDataFromControl(control, unix.IPPROTO_IPV6, unix.IPV6_PKTINFO, unix.SizeofInet6Pktinfo); data != nil {
+		return netip.AddrFrom16((*unix.Inet6Pktinfo)(unsafe.Pointer(&data[0])).Addr)
+	}
+	return netip.Addr{}
+}
+
+// appendSourceControl adds pktinfo without replacing an existing UDP_SEGMENT
+// control message. The interface index stays zero so source policy routing can
+// distinguish multiple addresses on the same interface.
+func appendSourceControl(control []byte, src netip.Addr) []byte {
+	start := len(control)
+	size := unix.SizeofInet6Pktinfo
+	if src.Is4() {
+		size = unix.SizeofInet4Pktinfo
+	}
+	control = control[:start+unix.CmsgSpace(size)]
+	clear(control[start:])
+	hdr := (*unix.Cmsghdr)(unsafe.Pointer(&control[start]))
+	hdr.SetLen(unix.CmsgLen(size))
+	data := control[start+unix.SizeofCmsghdr:]
+	if src.Is4() {
+		hdr.Level, hdr.Type = unix.IPPROTO_IP, unix.IP_PKTINFO
+		(*unix.Inet4Pktinfo)(unsafe.Pointer(&data[0])).Spec_dst = src.As4()
+	} else {
+		hdr.Level, hdr.Type = unix.IPPROTO_IPV6, unix.IPV6_PKTINFO
+		(*unix.Inet6Pktinfo)(unsafe.Pointer(&data[0])).Addr = src.As16()
+	}
+	return control
 }
 
 // getRXQOverflowsFromControl returns the rxq overflows cumulative counter found
@@ -652,9 +693,17 @@ func TryUpgradeToConn(pconn nettype.PacketConn, network string, batchSize int, r
 	}
 	switch network {
 	case "udp4":
-		b.xpc = ipv4.NewPacketConn(uc)
+		pc := ipv4.NewPacketConn(uc)
+		if err := pc.SetControlMessage(ipv4.FlagDst, true); err != nil {
+			return pconn
+		}
+		b.xpc = pc
 	case "udp6":
-		b.xpc = ipv6.NewPacketConn(uc)
+		pc := ipv6.NewPacketConn(uc)
+		if err := pc.SetControlMessage(ipv6.FlagDst, true); err != nil {
+			return pconn
+		}
+		b.xpc = pc
 	default:
 		panic("bogus network")
 	}
@@ -680,7 +729,8 @@ var controlMessageSize = -1 // bomb if used for allocation before init
 func init() {
 	controlMessageSize =
 		unix.CmsgSpace(2) + // UDP_GRO or UDP_SEGMENT gsoSize (uint16)
-			unix.CmsgSpace(4) // SO_RXQ_OVFL counter (uint32)
+			unix.CmsgSpace(4) + // SO_RXQ_OVFL counter (uint32)
+			unix.CmsgSpace(unix.SizeofInet6Pktinfo) // IP(V6)_PKTINFO
 }
 
 // MinControlMessageSize returns the minimum control message size required to

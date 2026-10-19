@@ -99,14 +99,14 @@ func (c *RebindingUDPConn) WriteWireGuardBatchTo(buffs [][]byte, addr epAddr, of
 				} else {
 					buf = buf[offset:]
 				}
-				_, err := c.writeToUDPAddrPortWithInitPconn(pconn, buf, addr.ap)
+				_, err := c.writeToUDPAddrPortWithInitPconn(pconn, buf, addr)
 				if err != nil {
 					return err
 				}
 			}
 			return nil
 		}
-		err := b.WriteBatchTo(buffs, addr.ap, gh, offset)
+		err := b.WriteBatchTo(buffs, addr.ap, addr.localIP, gh, offset)
 		if err != nil {
 			if pconn != c.currentConn() {
 				continue
@@ -174,9 +174,18 @@ func (c *RebindingUDPConn) closeLocked() error {
 	return c.pconn.Close()
 }
 
-func (c *RebindingUDPConn) writeToUDPAddrPortWithInitPconn(pconn nettype.PacketConn, b []byte, addr netip.AddrPort) (int, error) {
+func (c *RebindingUDPConn) writeToUDPAddrPortWithInitPconn(pconn nettype.PacketConn, b []byte, addr epAddr) (int, error) {
 	for {
-		n, err := pconn.WriteToUDPAddrPort(b, addr)
+		var n int
+		var err error
+		if bc, ok := pconn.(batching.Conn); ok && addr.localIP.IsValid() {
+			err = bc.WriteBatchTo([][]byte{b}, addr.ap, addr.localIP, packet.GeneveHeader{}, 0)
+			if err == nil {
+				n = len(b)
+			}
+		} else {
+			n, err = pconn.WriteToUDPAddrPort(b, addr.ap)
+		}
 		if err != nil && pconn != c.currentConn() {
 			pconn = *c.pconnAtomic.Load()
 			continue
@@ -186,6 +195,10 @@ func (c *RebindingUDPConn) writeToUDPAddrPortWithInitPconn(pconn nettype.PacketC
 }
 
 func (c *RebindingUDPConn) WriteToUDPAddrPort(b []byte, addr netip.AddrPort) (int, error) {
+	return c.writeToUDPAddrPort(b, epAddr{ap: addr})
+}
+
+func (c *RebindingUDPConn) writeToUDPAddrPort(b []byte, addr epAddr) (int, error) {
 	return c.writeToUDPAddrPortWithInitPconn(*c.pconnAtomic.Load(), b, addr)
 }
 

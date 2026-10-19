@@ -4,6 +4,7 @@
 package batching
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -143,6 +144,24 @@ func Test_linuxBatchingConn_splitCoalescedMessages(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("preserves-pktinfo", func(t *testing.T) {
+		control := append(gsoControl(1), makeControlMsg(unix.IPPROTO_IPV6, unix.IPV6_PKTINFO, unix.SizeofInet6Pktinfo)...)
+		msgs := []ipv6.Message{newMsg(0, 0), newMsg(0, 0), newMsg(3, 1), newMsg(0, 0)}
+		for i := range msgs {
+			msgs[i].OOB = make([]byte, controlMessageSize)
+		}
+		msgs[2].NN = copy(msgs[2].OOB, control)
+		n, err := c.splitCoalescedMessages(msgs, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, msg := range msgs[:n] {
+			if got := msg.OOB[:msg.NN]; !bytes.Equal(got, control) {
+				t.Errorf("control = %x, want %x", got, control)
+			}
+		}
+	})
 }
 
 func Test_linuxBatchingConn_coalesceMessages(t *testing.T) {
@@ -483,7 +502,7 @@ func Test_linuxBatchingConn_WriteBatchTo_resetsBuffersOnGSORetry(t *testing.T) {
 	// to len 2 (scatter-gather) on the first pass.
 	buffs := [][]byte{make([]byte, 32), make([]byte, 32)}
 
-	err = c.WriteBatchTo(buffs, netip.MustParseAddrPort("127.0.0.1:1"), packet.GeneveHeader{}, 0)
+	err = c.WriteBatchTo(buffs, netip.MustParseAddrPort("127.0.0.1:1"), netip.Addr{}, packet.GeneveHeader{}, 0)
 
 	// The retry path always returns ErrUDPGSODisabled wrapping the retry's
 	// result (nil here).
@@ -563,7 +582,7 @@ func Test_linuxBatchingConn_WriteBatchTo_offsetStableOnNonCoalesceRetry(t *testi
 	}
 
 	// Must not panic: each pass recomputes the offset from the original.
-	err = c.WriteBatchTo(buffs, netip.MustParseAddrPort("127.0.0.1:1"), geneve, offset)
+	err = c.WriteBatchTo(buffs, netip.MustParseAddrPort("127.0.0.1:1"), netip.Addr{}, geneve, offset)
 
 	if _, ok := errors.AsType[neterror.ErrUDPGSODisabled](err); !ok {
 		t.Fatalf("got %v, want ErrUDPGSODisabled", err)

@@ -6,9 +6,13 @@
 package batching
 
 import (
+	"net/netip"
+
 	"tailscale.com/control/controlknobs"
 	"tailscale.com/types/nettype"
 )
+
+func LocalAddrFromControl([]byte) netip.Addr { return netip.Addr{} }
 
 // TryUpgradeToConn is no-op on all platforms except linux.
 func TryUpgradeToConn(pconn nettype.PacketConn, _ string, _ int, _ string, _ *controlknobs.Knobs) nettype.PacketConn {

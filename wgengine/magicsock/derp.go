@@ -780,7 +780,7 @@ func (c *Conn) processDERPReadResult(dm derpReadResult, b []byte) (n int, ep *en
 // to the region if one doesn't already exist.
 func (c *Conn) SendDERPPacketTo(dstKey key.NodePublic, regionID int, pkt []byte) (sent bool, err error) {
 	return c.sendAddr(
-		netip.AddrPortFrom(tailcfg.DerpMagicIPAddr, uint16(regionID)),
+		epAddr{ap: netip.AddrPortFrom(tailcfg.DerpMagicIPAddr, uint16(regionID))},
 		dstKey, pkt, false, false)
 }
 

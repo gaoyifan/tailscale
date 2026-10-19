@@ -4359,7 +4359,7 @@ func TestConn_receiveIP(t *testing.T) {
 			inputPacket := make([]byte, len(tt.b))
 			copy(inputPacket, tt.b)
 
-			got, gotSize, gotIsGeneveEncap, gotOk := c.receiveIP(inputPacket, tt.ipp, tt.cache)
+			got, gotSize, gotIsGeneveEncap, gotOk := c.receiveIP(inputPacket, epAddr{ap: tt.ipp}, tt.cache)
 			if (tt.wantEndpointType == nil) != (got == nil) {
 				t.Errorf("receiveIP() (tt.wantEndpointType == nil): %v != (got == nil): %v", tt.wantEndpointType == nil, got == nil)
 			}

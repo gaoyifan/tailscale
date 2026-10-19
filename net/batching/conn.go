@@ -43,7 +43,8 @@ type Conn interface {
 	//
 	// Each [ipv6.Message.OOB] must be sized to at least MinControlMessageSize().
 	ReadBatch(msgs []ipv6.Message, flags int) (n int, err error)
-	// WriteBatchTo writes buffs to addr.
+	// WriteBatchTo writes buffs to addr, using localIP as the source address
+	// when it is valid.
 	//
 	// If geneve.VNI.IsSet(), then geneve is encoded into the space preceding
 	// offset, and offset must equal [packet.GeneveFixedHeaderLength]. If
@@ -53,5 +54,5 @@ type Conn interface {
 	//
 	// WriteBatchTo may return a [neterror.ErrUDPGSODisabled] error if UDP GSO
 	// was disabled as a result of a send error.
-	WriteBatchTo(buffs [][]byte, addr netip.AddrPort, geneve packet.GeneveHeader, offset int) error
+	WriteBatchTo(buffs [][]byte, addr netip.AddrPort, localIP netip.Addr, geneve packet.GeneveHeader, offset int) error
 }

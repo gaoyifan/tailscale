@@ -398,6 +398,7 @@ type sentPing struct {
 // map key)
 type endpointState struct {
 	// all fields guarded by endpoint.mu
+	localIP netip.Addr // local destination of the last authenticated disco packet
 
 	// lastPing is the last (outgoing) ping time.
 	lastPing mono.Time
@@ -497,8 +498,7 @@ func (de *endpoint) deleteEndpointLocked(why string, ep netip.AddrPort) {
 		From: ep,
 	})
 	delete(de.endpointState, ep)
-	asEpAddr := epAddr{ap: ep}
-	if de.bestAddr.epAddr == asEpAddr {
+	if de.bestAddr.isDirect() && de.bestAddr.ap == ep {
 		de.debugUpdates.Add(EndpointChange{
 			When: time.Now(),
 			What: "deleteEndpointLocked-bestAddr-" + why,
@@ -525,7 +525,7 @@ func (de *endpoint) initFakeUDPAddr() {
 func (de *endpoint) noteRecvActivity(src epAddr, now mono.Time) bool {
 	if de.isWireguardOnly {
 		de.mu.Lock()
-		de.bestAddr.ap = src.ap
+		de.bestAddr.epAddr = src
 		de.bestAddrAt = now
 		de.trustBestAddrUntil = now.Add(5 * time.Second)
 		de.mu.Unlock()
@@ -1131,7 +1131,7 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 			buff = buff[offset:]
 			const isDisco = false
 			const isGeneveEncap = false
-			ok, _ := de.c.sendAddr(derpAddr, de.publicKey, buff, isDisco, isGeneveEncap)
+			ok, _ := de.c.sendAddr(epAddr{ap: derpAddr}, de.publicKey, buff, isDisco, isGeneveEncap)
 			txBytes += len(buff)
 			if !ok {
 				allOk = false
@@ -1306,6 +1306,11 @@ func (de *endpoint) startDiscoPingLocked(ep epAddr, now mono.Time, purpose disco
 	epDisco := de.disco.Load()
 	if epDisco == nil {
 		return
+	}
+	if !ep.localIP.IsValid() && !ep.vni.IsSet() {
+		if st := de.endpointState[ep.ap]; st != nil {
+			ep.localIP = st.localIP
+		}
 	}
 	if purpose != pingCLI &&
 		!ep.vni.IsSet() { // de.endpointState is only relevant for direct/non-vni epAddr's
@@ -1602,12 +1607,14 @@ func (de *endpoint) setEndpointsLocked(eps interface {
 //
 // This is called once we've already verified that we got a valid
 // discovery message from de via ep.
-func (de *endpoint) addCandidateEndpoint(ep netip.AddrPort, forRxPingTxID stun.TxID) (duplicatePing bool) {
+func (de *endpoint) addCandidateEndpoint(src epAddr, forRxPingTxID stun.TxID) (duplicatePing bool) {
 	de.mu.Lock()
 	defer de.mu.Unlock()
 
+	ep := src.ap
 	if st, ok := de.endpointState[ep]; ok {
-		duplicatePing = forRxPingTxID == st.lastGotPingTxID
+		duplicatePing = forRxPingTxID == st.lastGotPingTxID && src.localIP == st.localIP
+		st.localIP = src.localIP
 		if !duplicatePing {
 			st.lastGotPingTxID = forRxPingTxID
 		}
@@ -1622,6 +1629,7 @@ func (de *endpoint) addCandidateEndpoint(ep netip.AddrPort, forRxPingTxID stun.T
 	// Newly discovered endpoint. Exciting!
 	de.c.dlogf("[v1] magicsock: disco: adding %v as candidate endpoint for %v (%s)", ep, de.discoShort(), de.publicKey.ShortString())
 	de.endpointState[ep] = &endpointState{
+		localIP:         src.localIP,
 		lastGotPing:     time.Now(),
 		lastGotPingTxID: forRxPingTxID,
 	}
@@ -1764,6 +1772,7 @@ func (de *endpoint) handlePongConnLocked(m *disco.Pong, di *discoInfo, src epAdd
 			from:    src.ap,
 			pongSrc: m.Src,
 		})
+		st.localIP = src.localIP
 	}
 
 	if sp.purpose != pingHeartbeat && sp.purpose != pingHeartbeatForUDPLifetime {
@@ -1785,6 +1794,7 @@ func (de *endpoint) handlePongConnLocked(m *disco.Pong, di *discoInfo, src epAdd
 	// Promote this pong response to our current best address if it's lower latency.
 	// TODO(bradfitz): decide how latency vs. preference order affects decision
 	if !isDerp {
+		sp.to.localIP = src.localIP
 		thisPong := addrQuality{
 			epAddr:  sp.to,
 			latency: latency,
@@ -1819,8 +1829,9 @@ func (de *endpoint) handlePongConnLocked(m *disco.Pong, di *discoInfo, src epAdd
 // epAddr is a [netip.AddrPort] with an optional Geneve header (RFC8926)
 // [packet.VirtualNetworkID].
 type epAddr struct {
-	ap  netip.AddrPort          // if ap == tailcfg.DerpMagicIPAddr then vni is never set
-	vni packet.VirtualNetworkID // vni.IsSet() indicates if this [epAddr] involves a Geneve header
+	ap      netip.AddrPort          // if ap == tailcfg.DerpMagicIPAddr then vni is never set
+	vni     packet.VirtualNetworkID // vni.IsSet() indicates if this [epAddr] involves a Geneve header
+	localIP netip.Addr              // source address for this path; not part of peer identity
 }
 
 // isDirect returns true if e.ap is valid and not tailcfg.DerpMagicIPAddr,
